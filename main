@@ -1,0 +1,1151 @@
+import sys
+import json
+import os
+import uuid
+import networkx as nx
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QLineEdit, QLabel, QPushButton,
+    QListWidget, QGroupBox, QComboBox,
+    QMessageBox, QDialog, QDialogButtonBox, QGraphicsView,
+    QGraphicsScene, QGraphicsRectItem, QMenu, QToolBar,
+    QDockWidget, QGraphicsPathItem, QGraphicsSimpleTextItem,
+    QHBoxLayout
+)
+from PyQt6.QtGui import (
+    QBrush, QColor, QPen, QFont, QPainter, QAction, QPainterPath
+)
+from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF
+
+
+# --- Класс Person ---
+class Person:
+    """Класс для хранения данных о человеке."""
+
+    def __init__(self, name, birth_year=None, nickname=None, dossier=None, photo_path=None, unique_id=None):
+        self.name = name
+        self.birth_year = birth_year
+        self.nickname = nickname
+        self.dossier = dossier
+        self.photo_path = photo_path
+        self.father_id = None
+        self.mother_id = None
+        self.child_ids = []
+        self.spouse_ids = []
+        self.unique_id = unique_id if unique_id else str(uuid.uuid4())
+
+    def to_dict(self):
+        """Преобразует объект Person в словарь для сохранения."""
+        return {
+            "name": self.name,
+            "birth_year": self.birth_year,
+            "nickname": self.nickname,
+            "dossier": self.dossier,
+            "photo_path": self.photo_path,
+            "father_id": self.father_id,
+            "mother_id": self.mother_id,
+            "child_ids": self.child_ids,
+            "spouse_ids": self.spouse_ids,
+            "unique_id": self.unique_id
+        }
+
+    @staticmethod
+    def from_dict(data):
+        """Создает объект Person из словаря."""
+        person = Person(
+            data.get("name"),
+            data.get("birth_year"),
+            data.get("nickname"),
+            data.get("dossier"),
+            data.get("photo_path"),
+            data.get("unique_id")
+        )
+        person.father_id = data.get("father_id")
+        person.mother_id = data.get("mother_id")
+        person.child_ids = data.get("child_ids", [])
+        person.spouse_ids = data.get("spouse_ids", [])
+        return person
+
+
+# --- Глобальные переменные и файлы ---
+all_people = []
+DATA_FILE = "family_tree_data.json"
+SECRET_PASSWORD = "1"
+current_selected_person = None
+
+
+# --- Функции для сохранения и загрузки данных ---
+def save_data_to_file():
+    """Сохраняет данные всех людей в JSON файл."""
+    data = [person.to_dict() for person in all_people]
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        return True, f"Данные успешно сохранены в файл '{DATA_FILE}'."
+    except Exception as e:
+        return False, f"Не удалось сохранить данные: {e}"
+
+
+def load_data_from_file():
+    """Загружает данные из JSON файла."""
+    global all_people
+    all_people = []
+    if not os.path.exists(DATA_FILE):
+        return False, f"Файл '{DATA_FILE}' не найден."
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for item in data:
+                all_people.append(Person.from_dict(item))
+        return True, f"Данные успешно загружены из файла '{DATA_FILE}'."
+    except Exception as e:
+        return False, f"Не удалось загрузить данные: {e}"
+
+
+def get_person_by_name(name):
+    """Возвращает объект Person по имени."""
+    for person in all_people:
+        if person.name == name:
+            return person
+    return None
+
+
+def get_person_by_id(person_id):
+    """Возвращает объект Person по уникальному идентификатору."""
+    for person in all_people:
+        if person.unique_id == person_id:
+            return person
+    return None
+
+
+# --- Custom QGraphicsItems для нодов и связей (обновлено) ---
+class ConnectionGraphicsItem(QGraphicsPathItem):
+    """Класс для отрисовки связей Безье между портами."""
+
+    def __init__(self, source_pos, target_pos, source_node_id, target_node_id, relation_type="child"):
+        super().__init__()
+        self.source_pos = source_pos
+        self.target_pos = target_pos
+        self.source_node_id = source_node_id
+        self.target_node_id = target_node_id
+        self.relation_type = relation_type
+
+        pen_color = QColor("#d1b138")  # Оранжевый по умолчанию
+        pen_style = Qt.PenStyle.DashLine
+
+        if relation_type == "spouse":
+            pen_color = QColor("#38d138")  # Зеленый для супругов
+            pen_style = Qt.PenStyle.SolidLine
+
+        pen = QPen(pen_color, 2, pen_style)
+        self.setPen(pen)
+        self.setZValue(1)
+
+    def update_positions(self, source_pos, target_pos):
+        """Обновляет начальную и конечную позицию линии."""
+        self.source_pos = source_pos
+        self.target_pos = target_pos
+        self.update_path()
+
+    def update_path(self):
+        """Пересчитывает и обновляет путь для кривой Безье."""
+        path = QPainterPath()
+        path.moveTo(self.source_pos)
+
+        # Коррекция контрольных точек для лучшего изгиба
+        c1 = QPointF(self.source_pos.x() + (self.target_pos.x() - self.source_pos.x()) * 0.3, self.source_pos.y())
+        c2 = QPointF(self.source_pos.x() + (self.target_pos.x() - self.source_pos.x()) * 0.7, self.target_pos.y())
+
+        path.cubicTo(c1, c2, self.target_pos)
+
+        self.setPath(path)
+
+    def paint(self, painter, option, widget=None):
+        self.update_path()
+        super().paint(painter, option, widget)
+
+
+class PersonNodeGraphicsItem(QGraphicsRectItem):
+    """Класс для отрисовки нодов с портами, стилизованных под 3ds Max."""
+
+    def __init__(self, person, main_window):
+        super().__init__()
+        self.person = person
+        self.main_window = main_window
+        self.setFlags(
+            QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable | QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setAcceptHoverEvents(True)
+        self.setZValue(2)
+
+        self.node_width = 150
+        self.node_height = 80
+        self.header_height = 25
+        self.port_size = 10
+
+        self.setRect(0, 0, self.node_width, self.node_height)
+        self.setBrush(QBrush(QColor("#424242")))
+        self.header_color = QColor("#5d5d5d")
+
+        self.thin_pen = QPen(QColor("#5a5a5a"), 1)
+        self.setPen(self.thin_pen)
+
+        # Текст имени и года рождения
+        name_text_str = f"{self.person.name}"
+        if self.person.birth_year:
+            name_text_str += f" ({self.person.birth_year})"
+
+        self.name_text = QGraphicsSimpleTextItem(self)
+        self.name_text.setText(name_text_str)
+        self.name_text.setBrush(QBrush(QColor("#f0f0f0")))
+        self.name_text.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.name_text.setPos(5, 5)
+
+        # Порты
+        # Порт для входящей связи (родитель -> ребенок) - левый
+        self.parent_port_in = QGraphicsRectItem(self)
+        self.parent_port_in.setRect(-self.port_size / 2, self.node_height / 2 - self.port_size / 2, self.port_size,
+                                    self.port_size)
+        self.parent_port_in.setBrush(QBrush(QColor("#d13838")))  # Красный
+        self.parent_port_in.setPen(QPen(QColor("#2b2b2b"), 1))
+        self.parent_port_in.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.parent_port_in.setToolTip("Вход для родителя")
+
+        # Порт для исходящей связи (родитель -> ребенок) - правый
+        self.child_port_out = QGraphicsRectItem(self)
+        self.child_port_out.setRect(self.node_width - self.port_size / 2, self.node_height / 2 - self.port_size / 2,
+                                    self.port_size, self.port_size)
+        self.child_port_out.setBrush(QBrush(QColor("#d1b138")))  # Желтый
+        self.child_port_out.setPen(QPen(QColor("#2b2b2b"), 1))
+        self.child_port_out.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.child_port_out.setToolTip("Выход для детей")
+
+        # Порты для связей между супругами - левый и правый
+        self.spouse_port_left = QGraphicsRectItem(self)
+        self.spouse_port_left.setRect(-self.port_size / 2, self.node_height / 2 - self.port_size / 2 - 20,
+                                      self.port_size, self.port_size)
+        self.spouse_port_left.setBrush(QBrush(QColor("#38d138")))  # Зеленый
+        self.spouse_port_left.setPen(QPen(QColor("#2b2b2b"), 1))
+        self.spouse_port_left.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.spouse_port_left.setToolTip("Вход/Выход для супруга")
+
+        self.spouse_port_right = QGraphicsRectItem(self)
+        self.spouse_port_right.setRect(self.node_width - self.port_size / 2,
+                                       self.node_height / 2 - self.port_size / 2 - 20, self.port_size, self.port_size)
+        self.spouse_port_right.setBrush(QBrush(QColor("#38d138")))  # Зеленый
+        self.spouse_port_right.setPen(QPen(QColor("#2b2b2b"), 1))
+        self.spouse_port_right.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.spouse_port_right.setToolTip("Вход/Выход для супруга")
+
+        # Словарь для хранения портов по их именам
+        self.ports = {
+            "parent_in": self.parent_port_in,
+            "child_out": self.child_port_out,
+            "spouse_left": self.spouse_port_left,
+            "spouse_right": self.spouse_port_right
+        }
+
+        # Текстовые метки для портов
+        self.parent_label = QGraphicsSimpleTextItem("Родители", self)
+        self.parent_label.setPos(-60, self.node_height / 2 - 10)
+        self.parent_label.setBrush(QBrush(QColor("#f0f0f0")))
+        self.parent_label.setFont(QFont("Arial", 8))
+
+        self.child_label = QGraphicsSimpleTextItem("Дети", self)
+        self.child_label.setPos(self.node_width + 10, self.node_height / 2 - 10)
+        self.child_label.setBrush(QBrush(QColor("#f0f0f0")))
+        self.child_label.setFont(QFont("Arial", 8))
+
+        # Словарь для хранения исходных кистей портов
+        self.original_port_brushes = {
+            "parent_in": self.parent_port_in.brush(),
+            "child_out": self.child_port_out.brush(),
+            "spouse_left": self.spouse_port_left.brush(),
+            "spouse_right": self.spouse_port_right.brush()
+        }
+
+    def get_port_pos(self, port_name):
+        """Возвращает позицию порта в сценических координатах."""
+        port_item = self.ports.get(port_name)
+        if port_item:
+            return self.mapToScene(port_item.rect().center())
+        return QPointF(0, 0)
+
+    def get_port_name_by_item(self, port_item):
+        """Возвращает имя порта по его объекту."""
+        for name, item in self.ports.items():
+            if item == port_item:
+                return name
+        return None
+
+    def paint(self, painter, option, widget=None):
+        """Переопределенный метод отрисовки нода."""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        path = QPainterPath()
+        path.addRoundedRect(self.rect(), 5, 5)
+        painter.fillPath(path, self.brush())
+
+        header_path = QPainterPath()
+        header_rect = self.rect().adjusted(0, 0, 0, - self.rect().height() + self.header_height)
+        header_path.addRoundedRect(header_rect, 5, 5, Qt.SizeMode.AbsoluteSize)
+        painter.fillPath(header_path, QBrush(self.header_color))
+
+        painter.setPen(self.thin_pen)
+        painter.drawPath(path)
+
+    def mousePressEvent(self, event):
+        """Обработка нажатия мыши для выделения."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.main_window.update_properties_panel(self.person)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Обновление связей при перемещении нода."""
+        super().mouseMoveEvent(event)
+        self.main_window.family_tree_view.update_connections()
+        self.scene().update()
+
+    def contextMenuEvent(self, event):
+        """Контекстное меню для нода."""
+        context_menu = QMenu(self.main_window)
+        edit_action = QAction("Редактировать", self.main_window)
+        edit_action.triggered.connect(lambda: self.main_window.edit_person_from_node(self.person))
+        context_menu.addAction(edit_action)
+        context_menu.exec(event.screenPos())
+
+
+# --- Виджет для графического древа (с сеткой, нодами и зумом) ---
+class FamilyTreeWidget(QGraphicsView):
+    """Виджет для отрисовки графического древа."""
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setBackgroundBrush(QBrush(QColor("#1e1e1e")))
+        self.setSceneRect(-10000, -10000, 20000, 20000)
+
+        self.person_nodes = {}
+        self.connections = []
+        self.draw_grid()
+
+        self.is_dragging_connection = False
+        self.temp_connection_line = QGraphicsPathItem()
+        self.drag_start_port_item = None
+        self.drag_start_node_item = None
+        self.highlighted_port = None
+
+        self.setMouseTracking(True)
+
+    def draw_grid(self):
+        """Отрисовывает сетку на сцене."""
+        self.scene.clear()
+        self.person_nodes = {}
+        self.connections = []
+
+        grid_pen_small = QPen(QColor("#3c3c3c"))
+        grid_pen_small.setWidth(0)
+        grid_pen_big = QPen(QColor("#5a5a5a"))
+        grid_pen_big.setWidth(0)
+
+        grid_size_small = 20
+        grid_size_big = 100
+
+        rect = self.sceneRect()
+
+        for x in range(int(rect.left()), int(rect.right()), grid_size_big):
+            line = self.scene.addLine(x, rect.top(), x, rect.bottom(), grid_pen_big)
+            line.setZValue(0)
+        for y in range(int(rect.top()), int(rect.bottom()), grid_size_big):
+            line = self.scene.addLine(rect.left(), y, rect.right(), y, grid_pen_big)
+            line.setZValue(0)
+
+        for x in range(int(rect.left()), int(rect.right()), grid_size_small):
+            line = self.scene.addLine(x, rect.top(), x, rect.bottom(), grid_pen_small)
+            line.setZValue(0)
+        for y in range(int(rect.top()), int(rect.bottom()), grid_size_small):
+            line = self.scene.addLine(rect.left(), y, rect.right(), y, grid_pen_small)
+            line.setZValue(0)
+
+    def draw_tree(self):
+        """Отрисовывает все ноды и связи, основываясь на данных, используя spring_layout."""
+        self.draw_grid()
+
+        if not all_people:
+            return
+
+        G = nx.DiGraph()
+        for p in all_people:
+            G.add_node(p.unique_id)
+
+        for p in all_people:
+            if p.father_id:
+                G.add_edge(p.father_id, p.unique_id, relation="parent_child")
+            if p.mother_id:
+                G.add_edge(p.mother_id, p.unique_id, relation="parent_child")
+
+            for spouse_id in p.spouse_ids:
+                if p.unique_id < spouse_id:
+                    G.add_edge(p.unique_id, spouse_id, relation="spouse")
+
+        try:
+            pos = nx.spring_layout(G, k=1, seed=42, iterations=50)
+        except nx.NetworkXPointlessConcept:
+            pos = {}
+            for i, p in enumerate(all_people):
+                pos[p.unique_id] = (i * 0.1, 0)
+
+        for person in all_people:
+            person_pos = pos.get(person.unique_id, [0, 0])
+            x, y = person_pos[0] * 500, person_pos[1] * 500
+
+            node = PersonNodeGraphicsItem(person, self.main_window)
+            node.setPos(x, y)
+            self.scene.addItem(node)
+            self.person_nodes[person.unique_id] = node
+
+        for edge in G.edges(data=True):
+            source_id, target_id, data = edge
+            source_node = self.person_nodes.get(source_id)
+            target_node = self.person_nodes.get(target_id)
+
+            if source_node and target_node:
+                relation_type = data.get("relation")
+
+                source_port_pos = QPointF(0, 0)
+                target_port_pos = QPointF(0, 0)
+
+                if relation_type == "parent_child":
+                    source_port_pos = source_node.get_port_pos("child_out")
+                    target_port_pos = target_node.get_port_pos("parent_in")
+                elif relation_type == "spouse":
+                    if source_id < target_id:
+                        source_port_pos = source_node.get_port_pos("spouse_right")
+                        target_port_pos = target_node.get_port_pos("spouse_left")
+                    else:
+                        source_port_pos = source_node.get_port_pos("spouse_left")
+                        target_port_pos = target_node.get_port_pos("spouse_right")
+
+                connection = ConnectionGraphicsItem(source_port_pos, target_port_pos, source_id, target_id,
+                                                    relation_type)
+                self.scene.addItem(connection)
+                self.connections.append(connection)
+
+        self.update_connections()
+
+    def update_connections(self):
+        """Обновляет позиции всех линий связей."""
+        for conn in self.connections:
+            source_node = self.person_nodes.get(conn.source_node_id)
+            target_node = self.person_nodes.get(conn.target_node_id)
+
+            if source_node and target_node:
+                source_pos = QPointF()
+                target_pos = QPointF()
+
+                if conn.relation_type == "parent_child":
+                    source_pos = source_node.get_port_pos("child_out")
+                    target_pos = target_node.get_port_pos("parent_in")
+                elif conn.relation_type == "spouse":
+                    if conn.source_node_id < conn.target_node_id:
+                        source_pos = source_node.get_port_pos("spouse_right")
+                        target_pos = target_node.get_port_pos("spouse_left")
+                    else:
+                        source_pos = source_node.get_port_pos("spouse_left")
+                        target_pos = target_node.get_port_pos("spouse_right")
+
+                conn.update_positions(source_pos, target_pos)
+
+    def highlight_port(self, port_item, should_highlight):
+        """Выделяет порт при наведении на него курсора."""
+        if not port_item:
+            return
+
+        node_item = port_item.parentItem()
+        port_type = node_item.get_port_name_by_item(port_item)
+
+        if port_type:
+            if should_highlight:
+                port_item.setBrush(QBrush(QColor("#f0f0f0")))
+            else:
+                port_item.setBrush(node_item.original_port_brushes[port_type])
+
+    def mousePressEvent(self, event):
+        """Обработка нажатия мыши для начала перетаскивания связи."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.pos())
+            if isinstance(item, QGraphicsRectItem) and isinstance(item.parentItem(), PersonNodeGraphicsItem):
+                self.is_dragging_connection = True
+                self.drag_start_port_item = item
+                self.drag_start_node_item = item.parentItem()
+
+                pen = QPen(QColor("#d1b138"), 2, Qt.PenStyle.SolidLine)
+                self.temp_connection_line.setPen(pen)
+                self.temp_connection_line.setZValue(2)
+                self.scene.addItem(self.temp_connection_line)
+
+                path = QPainterPath()
+                start_pos = self.drag_start_node_item.mapToScene(self.drag_start_port_item.rect().center())
+                path.moveTo(start_pos)
+                self.temp_connection_line.setPath(path)
+
+                return
+
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.show_context_menu_on_scene(event.pos())
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Обновление временной линии связи при перетаскивании."""
+        if self.is_dragging_connection:
+            path = QPainterPath()
+            start_pos = self.drag_start_node_item.mapToScene(self.drag_start_port_item.rect().center())
+            current_pos = self.mapToScene(event.pos())
+
+            path.moveTo(start_pos)
+
+            c1 = QPointF(start_pos.x() + (current_pos.x() - start_pos.x()) * 0.5, start_pos.y())
+            c2 = QPointF(start_pos.x() + (current_pos.x() - start_pos.x()) * 0.5, current_pos.y())
+            path.cubicTo(c1, c2, current_pos)
+
+            self.temp_connection_line.setPath(path)
+
+            end_item = self.itemAt(event.pos())
+            if isinstance(end_item, QGraphicsRectItem) and isinstance(end_item.parentItem(), PersonNodeGraphicsItem):
+                if self.highlighted_port and self.highlighted_port != end_item:
+                    self.highlight_port(self.highlighted_port, False)
+                self.highlight_port(end_item, True)
+                self.highlighted_port = end_item
+            else:
+                if self.highlighted_port:
+                    self.highlight_port(self.highlighted_port, False)
+                self.highlighted_port = None
+
+            self.scene.update()
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Обработка отпускания мыши для создания или удаления связи."""
+        if not self.is_dragging_connection:
+            return
+
+        self.is_dragging_connection = False
+        self.scene.removeItem(self.temp_connection_line)
+
+        if self.highlighted_port:
+            self.highlight_port(self.highlighted_port, False)
+            self.highlighted_port = None
+
+        old_connection = self.find_connection_by_port(self.drag_start_node_item.person.unique_id,
+                                                      self.drag_start_port_item)
+        if old_connection:
+            self.remove_relationship(old_connection)
+
+        target_port_item = None
+        end_item = self.itemAt(event.pos())
+        if isinstance(end_item, QGraphicsRectItem) and isinstance(end_item.parentItem(), PersonNodeGraphicsItem):
+            target_port_item = end_item
+
+        if target_port_item:
+            target_node_item = target_port_item.parentItem()
+            if self.drag_start_node_item.person.unique_id != target_node_item.person.unique_id:
+                self.create_new_relationship(
+                    self.drag_start_node_item,
+                    self.drag_start_port_item,
+                    target_node_item,
+                    target_port_item
+                )
+
+        self.drag_start_port_item = None
+        self.drag_start_node_item = None
+
+        self.update_connections()
+
+        super().mouseReleaseEvent(event)
+
+    def find_connection_by_port(self, person_id, port_item):
+        """Находит и возвращает существующую связь, привязанную к данному порту."""
+        start_port_type = port_item.parentItem().get_port_name_by_item(port_item)
+
+        for conn in self.connections:
+            is_parent_child_out = (
+                        conn.relation_type == "parent_child" and conn.source_node_id == person_id and start_port_type == "child_out")
+            is_parent_child_in = (
+                        conn.relation_type == "parent_child" and conn.target_node_id == person_id and start_port_type == "parent_in")
+            is_spouse = (conn.relation_type == "spouse" and (
+                        conn.source_node_id == person_id or conn.target_node_id == person_id) and (
+                                     "spouse" in start_port_type))
+
+            if is_parent_child_out or is_parent_child_in or is_spouse:
+                return conn
+        return None
+
+    def remove_relationship(self, connection):
+        """Удаляет связь из данных и из сцены."""
+        source_person = get_person_by_id(connection.source_node_id)
+        target_person = get_person_by_id(connection.target_node_id)
+
+        if not source_person or not target_person:
+            return
+
+        if connection.relation_type == "parent_child":
+            if target_person.father_id == source_person.unique_id:
+                target_person.father_id = None
+            if target_person.mother_id == source_person.unique_id:
+                target_person.mother_id = None
+            if target_person.unique_id in source_person.child_ids:
+                source_person.child_ids.remove(target_person.unique_id)
+
+        elif connection.relation_type == "spouse":
+            if target_person.unique_id in source_person.spouse_ids:
+                source_person.spouse_ids.remove(target_person.unique_id)
+            if source_person.unique_id in target_person.spouse_ids:
+                target_person.spouse_ids.remove(source_person.unique_id)
+
+        if connection in self.connections:
+            self.connections.remove(connection)
+        self.scene.removeItem(connection)
+        save_data_to_file()
+        QMessageBox.information(self.main_window, "Связь удалена", "Связь была успешно откреплена и удалена из данных.")
+
+    def create_new_relationship(self, start_node, start_port, end_node, end_port):
+        """Создает новую связь в данных и на сцене."""
+        start_person = start_node.person
+        end_person = end_node.person
+
+        start_port_type = start_node.get_port_name_by_item(start_port)
+        end_port_type = end_node.get_port_name_by_item(end_port)
+
+        connection_type = None
+
+        if start_port_type == "child_out" and end_port_type == "parent_in":
+            if end_person.father_id and end_person.mother_id:
+                QMessageBox.warning(self.main_window, "Ошибка", f"{end_person.name} уже имеет обоих родителей.")
+                return False
+            if start_person.unique_id in [end_person.father_id, end_person.mother_id]:
+                QMessageBox.warning(self.main_window, "Ошибка", "Эта связь уже существует.")
+                return False
+
+            if end_person.father_id is None:
+                end_person.father_id = start_person.unique_id
+            elif end_person.mother_id is None:
+                end_person.mother_id = start_person.unique_id
+
+            if end_person.unique_id not in start_person.child_ids:
+                start_person.child_ids.append(end_person.unique_id)
+            connection_type = "parent_child"
+
+        elif (start_port_type == "spouse_right" and end_port_type == "spouse_left") or \
+                (start_port_type == "spouse_left" and end_port_type == "spouse_right"):
+            if end_person.unique_id in start_person.spouse_ids:
+                QMessageBox.warning(self.main_window, "Ошибка", "Эта связь уже существует.")
+                return False
+
+            start_person.spouse_ids.append(end_person.unique_id)
+            end_person.spouse_ids.append(start_person.unique_id)
+
+            connection_type = "spouse"
+
+        if connection_type:
+            source_pos = start_node.get_port_pos(start_port_type)
+            target_pos = end_node.get_port_pos(end_port_type)
+            connection = ConnectionGraphicsItem(source_pos, target_pos, start_person.unique_id, end_person.unique_id,
+                                                connection_type)
+            self.scene.addItem(connection)
+            self.connections.append(connection)
+            save_data_to_file()
+            self.update_connections()
+            QMessageBox.information(self.main_window, "Связь создана", "Новая связь была успешно установлена.")
+            return True
+
+        QMessageBox.warning(self.main_window, "Ошибка", "Несовместимые порты.")
+        return False
+
+    def wheelEvent(self, event):
+        """Обработка колеса мыши для масштабирования."""
+        zoom_in_factor = 1.2
+        zoom_out_factor = 1 / zoom_in_factor
+
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+
+        if event.angleDelta().y() > 0:
+            self.scale(zoom_in_factor, zoom_in_factor)
+        else:
+            self.scale(zoom_out_factor, zoom_out_factor)
+
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+
+    def show_context_menu_on_scene(self, pos):
+        """Контекстное меню на пустом месте сцены."""
+        context_menu = QMenu(self)
+        create_action = QAction("Создать нового нода", self)
+        create_action.triggered.connect(self.main_window.show_add_person_dialog)
+        context_menu.addAction(create_action)
+        context_menu.exec(self.mapToGlobal(pos))
+
+
+class PersonListWindow(QDialog):
+    """Отдельное окно для отображения списка членов семьи."""
+
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.setWindowTitle("Список членов семьи")
+        self.setGeometry(200, 200, 300, 500)
+        self.main_window = main_window
+
+        layout = QVBoxLayout(self)
+        self.person_list_widget = QListWidget()
+        self.person_list_widget.itemSelectionChanged.connect(self.on_person_list_selection_changed)
+
+        layout.addWidget(QLabel("Список членов семьи:"))
+        layout.addWidget(self.person_list_widget)
+
+        self.update_list()
+
+    def update_list(self):
+        """Обновляет содержимое списка."""
+        self.person_list_widget.clear()
+        for person in all_people:
+            self.person_list_widget.addItem(person.name)
+
+    def on_person_list_selection_changed(self):
+        """Обрабатывает смену выделенного элемента в списке и обновляет панель свойств в главном окне."""
+        selected_items = self.person_list_widget.selectedItems()
+        if selected_items:
+            selected_name = selected_items[0].text()
+            person = get_person_by_name(selected_name)
+            self.main_window.update_properties_panel(person)
+        else:
+            self.main_window.update_properties_panel(None)
+
+
+# --- Класс главного окна ---
+class MainWindow(QMainWindow):
+    """Основное окно приложения."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Генеалогическое древо")
+        self.setGeometry(100, 100, 1600, 900)
+
+        self.setStyleSheet("""
+            QWidget { background-color: #2b2b2b; color: #f0f0f0; font-family: Arial; font-size: 12px; }
+            QMainWindow { background-color: #2b2b2b; }
+            QLineEdit, QPushButton, QListWidget, QComboBox { background-color: #3c3c3c; border: 1px solid #5a5a5a; padding: 5px; selection-background-color: #0078d7; }
+            QPushButton:hover { background-color: #4f4f4f; }
+            QGroupBox { border: 1px solid #5a5a5a; margin-top: 10px; }
+            QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 3px; color: #cccccc; }
+            QToolBar { background-color: #3c3c3c; border: 1px solid #5a5a5a; }
+            QToolButton { background-color: #3c3c3c; color: #f0f0f0; border: none; padding: 5px; }
+            QToolButton:hover { background-color: #4f4f4f; }
+        """)
+
+        self.person_list_window = None
+
+        self.central_widget = QWidget()
+        self.central_layout = QVBoxLayout(self.central_widget)
+        self.family_tree_view = FamilyTreeWidget(self)
+        self.central_layout.addWidget(self.family_tree_view)
+        self.setCentralWidget(self.central_widget)
+
+        self.create_docks()
+        self.create_actions()
+        self.create_menus()
+        self.create_toolbars()
+
+        self.load_data()
+
+    def create_docks(self):
+        """Создает доковые виджеты для панелей."""
+        self.left_dock = QDockWidget("Добавление нового члена семьи", self)
+        self.left_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.left_widget = QWidget()
+        self.left_layout = QVBoxLayout(self.left_widget)
+        self.left_dock.setWidget(self.left_widget)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
+        self.setup_add_person_panel()
+
+        self.right_dock = QDockWidget("Свойства персонажа", self)
+        self.right_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.right_widget = QWidget()
+        self.properties_group_layout = QVBoxLayout(self.right_widget)
+        self.right_dock.setWidget(self.right_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.right_dock)
+        self.setup_properties_panel()
+
+    def create_actions(self):
+        """Создает действия для меню и тулбаров."""
+        self.save_action = QAction("&Сохранить", self)
+        self.save_action.setStatusTip("Сохранить данные в файл")
+        self.save_action.triggered.connect(lambda: save_data_to_file())
+
+        self.load_action = QAction("&Загрузить", self)
+        self.load_action.setStatusTip("Загрузить данные из файла")
+        self.load_action.triggered.connect(self.load_data)
+
+        self.add_person_action = QAction("&Добавить", self)
+        self.add_person_action.triggered.connect(self.show_add_person_dialog)
+
+        self.show_list_action = QAction("&Список", self)
+        self.show_list_action.setStatusTip("Открыть окно со списком членов семьи")
+        self.show_list_action.triggered.connect(self.show_person_list_window)
+
+        self.search_action = QAction("&Найти", self)
+        self.search_action.triggered.connect(self.show_search_dialog)
+
+    def create_menus(self):
+        """Создает основное меню приложения."""
+        self.file_menu = self.menuBar().addMenu("&Файл")
+        self.file_menu.addAction(self.save_action)
+        self.file_menu.addAction(self.load_action)
+
+        self.edit_menu = self.menuBar().addMenu("&Правка")
+        self.edit_menu.addAction(self.add_person_action)
+        self.edit_menu.addAction(self.show_list_action)
+        self.edit_menu.addAction(self.search_action)
+
+        self.view_menu = self.menuBar().addMenu("&Вид")
+        self.view_menu.addAction(self.left_dock.toggleViewAction())
+        self.view_menu.addAction(self.right_dock.toggleViewAction())
+
+    def create_toolbars(self):
+        """Создает тулбар."""
+        toolbar = self.addToolBar("Основная")
+        toolbar.addAction(self.save_action)
+        toolbar.addAction(self.load_action)
+        toolbar.addAction(self.add_person_action)
+        toolbar.addAction(self.show_list_action)
+        toolbar.addAction(self.search_action)
+
+    def show_person_list_window(self):
+        """Открывает отдельное окно со списком членов семьи."""
+        if not self.person_list_window:
+            self.person_list_window = PersonListWindow(self)
+        self.person_list_window.update_list()
+        self.person_list_window.show()
+
+    def setup_add_person_panel(self):
+        """Настраивает панель для добавления новых людей."""
+        add_person_group = QGroupBox("Добавление нового члена семьи")
+        add_person_layout = QVBoxLayout(add_person_group)
+        self.name_input = QLineEdit()
+        self.birth_year_input = QLineEdit()
+        self.nickname_input = QLineEdit()
+        self.dossier_input = QLineEdit()
+        self.save_button = QPushButton("Создать")
+        self.save_button.clicked.connect(self.save_person_data)
+
+        add_person_layout.addWidget(QLabel("Имя:"))
+        add_person_layout.addWidget(self.name_input)
+        add_person_layout.addWidget(QLabel("Год рождения (необязательно):"))
+        add_person_layout.addWidget(self.birth_year_input)
+        add_person_layout.addWidget(QLabel("Кличка:"))
+        add_person_layout.addWidget(self.nickname_input)
+        add_person_layout.addWidget(QLabel("Досье:"))
+        add_person_layout.addWidget(self.dossier_input)
+        add_person_layout.addWidget(self.save_button)
+
+        self.left_layout.addWidget(add_person_group)
+
+    def setup_properties_panel(self):
+        """Настраивает панель свойств персонажа."""
+        self.properties_group = QGroupBox("Окно свойств персонажа")
+        properties_group_layout = self.properties_group_layout
+
+        self.properties_name = QLabel()
+        self.properties_birth = QLabel()
+        self.properties_nickname = QLabel()
+        self.properties_dossier = QLabel()
+
+        self.edit_button = QPushButton("Редактировать")
+        self.edit_button.setEnabled(False)
+        self.edit_button.clicked.connect(lambda: self.edit_person_from_node(current_selected_person))
+
+        self.delete_button = QPushButton("Удалить")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self.delete_selected_person)
+
+        properties_group_layout.addWidget(self.properties_group)
+        properties_group_layout.addWidget(self.properties_name)
+        properties_group_layout.addWidget(self.properties_birth)
+        properties_group_layout.addWidget(self.properties_nickname)
+        properties_group_layout.addWidget(self.properties_dossier)
+        properties_group_layout.addWidget(self.edit_button)
+        properties_group_layout.addWidget(self.delete_button)
+
+    def update_properties_panel(self, person):
+        """Обновляет содержимое панели свойств."""
+        global current_selected_person
+        current_selected_person = person
+        if person:
+            birth_year_text = str(person.birth_year) if person.birth_year is not None else "Не указан"
+            self.properties_name.setText(f"Имя: {person.name}")
+            self.properties_birth.setText(f"Год рождения: {birth_year_text}")
+            self.properties_nickname.setText(f"Кличка: {person.nickname if person.nickname else 'Не указан'}")
+            self.properties_dossier.setText(f"Досье: {person.dossier if person.dossier else 'Не указано'}")
+            self.edit_button.setEnabled(True)
+            self.delete_button.setEnabled(True)
+        else:
+            self.properties_name.setText("Имя: ")
+            self.properties_birth.setText("Год рождения: ")
+            self.properties_nickname.setText("Кличка: ")
+            self.properties_dossier.setText("Досье: ")
+            self.edit_button.setEnabled(False)
+            self.delete_button.setEnabled(False)
+
+    def update_ui_from_data_list(self):
+        """Обновляет список людей в отдельном окне."""
+        if self.person_list_window:
+            self.person_list_window.update_list()
+
+    def update_ui_from_data_full(self):
+        """Полностью обновляет UI, включая древо и список."""
+        self.update_ui_from_data_list()
+        self.family_tree_view.draw_tree()
+
+    def save_person_data(self):
+        """
+        Сохраняет данные нового человека из формы и размещает нод в центре экрана.
+        """
+        name = self.name_input.text().strip()
+        birth_year_str = self.birth_year_input.text().strip()
+        nickname = self.nickname_input.text().strip()
+        dossier = self.dossier_input.text().strip()
+
+        if not name:
+            QMessageBox.warning(self, "Ошибка", "Имя обязательно.")
+            return
+
+        birth_year = None
+        if birth_year_str:
+            try:
+                birth_year = int(birth_year_str)
+            except ValueError:
+                QMessageBox.warning(self, "Ошибка", "Год рождения должен быть числом.")
+                return
+
+        new_person = Person(name, birth_year, nickname, dossier)
+        all_people.append(new_person)
+
+        # Находим центр текущей видимой области в координатах сцены
+        center_pos = self.family_tree_view.mapToScene(self.family_tree_view.viewport().rect().center())
+
+        # Создаем новый нод и размещаем его по центру
+        node = PersonNodeGraphicsItem(new_person, self)
+        node.setPos(center_pos.x() - node.rect().width() / 2, center_pos.y() - node.rect().height() / 2)
+        self.family_tree_view.scene.addItem(node)
+        self.family_tree_view.person_nodes[new_person.unique_id] = node
+
+        QMessageBox.information(self, "Успех", f"Человек '{name}' добавлен.")
+
+        # Обновляем список в отдельном окне
+        if self.person_list_window:
+            self.person_list_window.update_list()
+
+        self.name_input.clear()
+        self.birth_year_input.clear()
+        self.nickname_input.clear()
+        self.dossier_input.clear()
+
+        save_data_to_file()
+
+    def load_data(self):
+        """Загружает данные из файла и обновляет UI."""
+        success, message = load_data_from_file()
+        if success:
+            QMessageBox.information(self, "Загрузка", message)
+        else:
+            QMessageBox.warning(self, "Загрузка", message)
+        self.update_ui_from_data_full()
+
+    def show_add_person_dialog(self):
+        """Отображает диалог для создания нового нода."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Создать нового нода")
+        layout = QVBoxLayout()
+
+        name_input = QLineEdit()
+        birth_year_input = QLineEdit()
+
+        layout.addWidget(QLabel("Имя:"))
+        layout.addWidget(name_input)
+        layout.addWidget(QLabel("Год рождения (необязательно):"))
+        layout.addWidget(birth_year_input)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.setLayout(layout)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            name = name_input.text().strip()
+            birth_year_str = birth_year_input.text().strip()
+            if name:
+                birth_year = None
+                if birth_year_str:
+                    try:
+                        birth_year = int(birth_year_str)
+                    except ValueError:
+                        QMessageBox.warning(self, "Ошибка", "Год рождения должен быть числом.")
+                        return
+
+                new_person = Person(name, birth_year)
+                all_people.append(new_person)
+
+                center_pos = self.family_tree_view.mapToScene(self.family_tree_view.viewport().rect().center())
+                node = PersonNodeGraphicsItem(new_person, self)
+                node.setPos(center_pos.x() - node.rect().width() / 2, center_pos.y() - node.rect().height() / 2)
+                self.family_tree_view.scene.addItem(node)
+                self.family_tree_view.person_nodes[new_person.unique_id] = node
+
+                QMessageBox.information(self, "Успех", f"Человек '{name}' добавлен.")
+                self.update_ui_from_data_full()
+                save_data_to_file()
+            else:
+                QMessageBox.warning(self, "Ошибка", "Имя обязательно.")
+
+    def edit_person_from_node(self, person):
+        """Отображает диалог для редактирования данных человека."""
+        if not person:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Редактировать {person.name}")
+        layout = QVBoxLayout()
+
+        name_input = QLineEdit(person.name)
+        birth_year_input_text = str(person.birth_year) if person.birth_year is not None else ""
+        birth_year_input = QLineEdit(birth_year_input_text)
+        nickname_input = QLineEdit(person.nickname)
+        dossier_input = QLineEdit(person.dossier)
+
+        layout.addWidget(QLabel("Имя:"))
+        layout.addWidget(name_input)
+        layout.addWidget(QLabel("Год рождения (необязательно):"))
+        layout.addWidget(birth_year_input)
+        layout.addWidget(QLabel("Кличка:"))
+        layout.addWidget(nickname_input)
+        layout.addWidget(QLabel("Досье:"))
+        layout.addWidget(dossier_input)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.setLayout(layout)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            old_name = person.name
+            new_name = name_input.text().strip()
+            new_birth_year_str = birth_year_input.text().strip()
+            new_nickname = nickname_input.text().strip()
+            new_dossier = dossier_input.text().strip()
+
+            if not new_name:
+                QMessageBox.warning(self, "Ошибка", "Имя обязательно.")
+                return
+
+            new_birth_year = None
+            if new_birth_year_str:
+                try:
+                    new_birth_year = int(new_birth_year_str)
+                except ValueError:
+                    QMessageBox.warning(self, "Ошибка", "Год рождения должен быть числом.")
+                    return
+
+            person.name = new_name
+            person.birth_year = new_birth_year
+            person.nickname = new_nickname
+            person.dossier = new_dossier
+
+            self.family_tree_view.draw_tree()  # При редактировании перерисовываем все древо
+            self.update_properties_panel(person)
+            save_data_to_file()
+            QMessageBox.information(self, "Успех", f"Данные о '{new_name}' успешно обновлены.")
+
+    def delete_selected_person(self):
+        """Удаляет выбранного человека."""
+        if not current_selected_person:
+            return
+
+        person_to_delete = current_selected_person
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение удаления",
+            f"Вы уверены, что хотите удалить {person_to_delete.name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            for person in all_people:
+                if person.father_id == person_to_delete.unique_id:
+                    person.father_id = None
+                if person.mother_id == person_to_delete.unique_id:
+                    person.mother_id = None
+                if person_to_delete.unique_id in person.child_ids:
+                    person.child_ids.remove(person_to_delete.unique_id)
+                if person_to_delete.unique_id in person.spouse_ids:
+                    person.spouse_ids.remove(person_to_delete.unique_id)
+
+            all_people.remove(person_to_delete)
+
+            self.update_ui_from_data_full()
+            self.update_properties_panel(None)
+            save_data_to_file()
+            QMessageBox.information(self, "Успех", f"'{person_to_delete.name}' был(а) удален(а).")
+
+    def show_search_dialog(self):
+        """Отображает диалог поиска (пока не реализовано)."""
+        QMessageBox.information(self, "Поиск", "Функция поиска пока не реализована.")
+
+
+def on_login_button_click(login_window, password_entry):
+    """Обработка кнопки входа."""
+    user_password = password_entry.text()
+    if user_password == SECRET_PASSWORD:
+        login_window.accept()
+    else:
+        QMessageBox.warning(login_window, "Ошибка", "Неверный пароль. Попробуйте еще раз.")
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+
+    login_window = QDialog()
+    login_window.setWindowTitle("Вход")
+    login_window.setFixedSize(300, 150)
+
+    login_layout = QVBoxLayout()
+    login_label = QLabel("Введите пароль:")
+    password_entry = QLineEdit()
+    password_entry.setEchoMode(QLineEdit.EchoMode.Password)
+
+    login_button = QPushButton("Войти")
+    login_button.clicked.connect(lambda: on_login_button_click(login_window, password_entry))
+
+    login_layout.addWidget(login_label)
+    login_layout.addWidget(password_entry)
+    login_layout.addWidget(login_button)
+
+    login_window.setLayout(login_layout)
+    password_entry.setFocus()
+
+    result = login_window.exec()
+
+    if result == QDialog.DialogCode.Accepted:
+        main_window = MainWindow()
+        main_window.show()
+        sys.exit(app.exec())
+    else:
+        sys.exit(0)
